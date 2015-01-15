@@ -1,4 +1,6 @@
 import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Scanner;
 
@@ -19,53 +21,81 @@ import java.util.Scanner;
  *  the assembler during patching.
  */
 public class Patchy {
-    static final float VERSION = 0.1f;
-    public static void main(String[] args) throws FileNotFoundException {
-        ////
-        //Important variables
-        ////
-        File patchFile = null;
-        File ROMFile = null;
-        HashMap<Long, String> patchParts = new HashMap<Long, String>();
-        //
+    static final float VERSION = 0.2f;
 
-        ////
-        //File input setup and error handling
-        ////
+    ////
+    //Important variables
+    ////
+    private static File ROMFile = null;
+    private static String patchText = "";
+    private static HashMap<Long, String> patchParts = new HashMap<Long, String>();
+    private static HashMap<String, Object> equVars = new HashMap<String, Object>();
+    private static Scanner inputReader = new Scanner(System.in);
+
+    public static void main(String[] args) throws FileNotFoundException {
+
+        handleFileArguments(args);
+        parsePatchForDirectives();
+        createSeparatePatchesAndCompile();
+        insertCompiledCodeInROM();
+        cleanup();
+
+        System.out.println("PATCHY: Done patching! :D");
+    }
+
+    private static void handleFileArguments(String[] args) {
         System.out.println("=== Patchy v" + VERSION + " by TheGag96 ===");
         if (args.length == 0) {
-            Scanner inputReader = new Scanner(System.in);
+            String patchPath = "";
 
-            while (patchFile == null || !patchFile.exists()) {
+            while (patchPath.equals("") || !Files.exists(Paths.get(patchPath))) {
                 System.out.print("Patch file | ");
-                patchFile = new File(inputReader.nextLine());
+                patchPath = inputReader.nextLine();
             }
-            while (ROMFile == null || !ROMFile.exists()) {
-                System.out.print("ROM file | ");
-                ROMFile = new File(inputReader.nextLine());
+
+            patchText = readStringFromFile(patchPath);
+
+            //if the .rom directive was never used, ask for the ROM filename now
+            if (!patchText.contains(".rom")) {
+                while (ROMFile == null || !ROMFile.exists()) {
+                    System.out.print("ROM file | ");
+                    ROMFile = new File(inputReader.nextLine());
+                }
             }
-            inputReader.close();
+
+        }
+        else if (args.length == 1) {
+            if (!Files.exists(Paths.get(args[0]))) {
+                error(0, "Given patch files doesn't exist.");
+            }
+            patchText = readStringFromFile(args[0]);
+
+            //if the .rom directive was never used, ask for the ROM filename now
+            if (!patchText.contains(".rom")) {
+                while (ROMFile == null || !ROMFile.exists()) {
+                    System.out.print("ROM file | ");
+                    ROMFile = new File(inputReader.nextLine());
+                }
+            }
         }
         else if (args.length == 2) {
-            patchFile = new File(args[0]);
             ROMFile = new File(args[1]);
-            if (!patchFile.exists()) {
+            if (!Files.exists(Paths.get(args[0]))) {
                 error(0, "Given patch file doesn't exist.");
             }
+            patchText = readStringFromFile(args[0]);
             if (!ROMFile.exists()) {
                 error(0, "Given ROM file doesn't exist.");
             }
         }
         else {
             error( -1, "Usage: patcher.exe [.asm file] [.gba file]\n" +
-                       "Alternatively, just run the program by itself and input the file names manually.");
+                    "Alternatively, just run the program by itself and input the file names manually.");
         }
-        //
+    }
 
-        ////
-        //Patch parsing
-        ////
-        Scanner patchReader = new Scanner(patchFile);
+    private static void parsePatchForDirectives() {
+        Scanner patchReader = new Scanner(patchText);
         Scanner lineScanner;
         int lineNum = 1;
         StringBuilder stringBuilder = new StringBuilder();
@@ -75,9 +105,12 @@ public class Patchy {
 
             String line = patchReader.nextLine();
 
-            //remove ; comments
-            if (line.contains(";")) {
-                line = line.substring(0, line.indexOf(';'));
+            //remove comments
+            if (line.contains("@")) {
+                line = line.substring(0, line.indexOf('@'));
+            }
+            if (line.contains("/*")) {
+                line = line.substring(0, line.indexOf("/*"));
             }
 
             lineScanner = new Scanner(line);
@@ -89,17 +122,32 @@ public class Patchy {
 
             String firstWord = lineScanner.next();
 
-            //detect .org directive and split up pieces of code in between
+            //detect directives and split up pieces of code in between
             if (firstWord.equals(".org")) {
-                long address;
-                if (lineScanner.hasNextInt(16)) {
-                    address = lineScanner.nextLong(16);
-                    System.out.println("PATCHY: Found insertion directive to " + Long.toHexString(address));
+                long address = 0;
+                if (lineScanner.hasNext()) {
+                    String addressString = lineScanner.next();
+                    if (addressString.startsWith("0x")) {
+                        address = Long.parseLong(addressString.substring(2), 16);
+                    }
+                    else if (equVars.containsKey(addressString)) {
+                        Object equValue = equVars.get(addressString);
+                        if (equValue instanceof Long) {
+                            address = (Long)equValue;
+                        }
+                        else {
+                            error(lineNum, "You can't .org to a string, silly!");
+                        }
+                    }
+                    else {
+                        error(lineNum, "\".org\" directive requires a valid hex address or variable.");
+                    }
+
+                    System.out.println("PATCHY: Found insertion directive to 0x" + Long.toHexString(address));
                     if (foundOrgOnce) {
                         patchParts.put(lastOrgAddress, stringBuilder.toString());
                         stringBuilder = new StringBuilder();
                     }
-
                     lastOrgAddress = address;
                     foundOrgOnce = true;
                 }
@@ -107,9 +155,84 @@ public class Patchy {
                     error(lineNum, ": You need a valid hex address after \".org\".");
                 }
             }
+            else if (firstWord.equals(".equ") || firstWord.equals(".set")) {
+                String varName = "";
+                Object varValue = null;
+                lineScanner.useDelimiter(" *, *");  //comma goes after variable name
+                if (lineScanner.hasNext()) {
+                    varName = lineScanner.next();
+                    lineScanner.reset();
+                    lineScanner.next();
+
+                    if (equVars.containsKey(varName)) {
+                        error(lineNum, "A variable of this name was already declared.");
+                    }
+
+                    if (lineScanner.hasNext()) {
+                        //support decimal numbers and hex numbers
+                        if (lineScanner.hasNextInt()) {
+                            varValue = lineScanner.nextInt();
+                        }
+                        else {
+                            String valueString = lineScanner.next();
+
+                            if (valueString.equals("<>")) {
+                                System.out.print("Value for variable \"" + varName + "\"? | ");
+                                valueString = inputReader.nextLine();
+                            }
+
+                            if (valueString.startsWith("0x")) {
+                                try {
+                                    varValue = Long.parseLong(valueString.substring(2), 16);
+                                } catch (NumberFormatException e) {
+                                    error(lineNum, "Variable value not a valid hex string.");
+                                }
+                            }
+                            else {
+
+                                try {
+                                    varValue = Long.parseLong(valueString);
+                                } catch (NumberFormatException e) {
+                                    if (valueString.startsWith("\"") && valueString.endsWith("\"")) {
+                                        varValue = valueString;
+                                    }
+                                    else {
+                                        System.out.println(valueString);
+                                        error(lineNum, "Invalid .equ value.");
+                                    }
+                                }
+                            }
+                        }
+                        equVars.put(varName, varValue);
+                    }
+                    else {
+                        error(lineNum, "Variable after \".org\" must be equal to something.");
+                    }
+                }
+                else {
+                    error(lineNum, "\".equ\" must be followed with a variable name (and then a comma).");
+                }
+
+                stringBuilder.append(".equ ").append(varName).append(", ").append(varValue).append("\n");
+            }
+            else if (firstWord.equals(".rom")) {
+                if (lineScanner.hasNext()) {
+                    if (ROMFile == null) {
+                        ROMFile = new File(lineScanner.next());
+                        if (!ROMFile.exists()) {
+                            error(lineNum, "Specified ROM file does not exist.");
+                        }
+                    }
+                    else {
+                        error(lineNum, "ROM file already declared.");
+                    }
+                }
+                else {
+                    error(lineNum, "\".rom\" must be followed with a path to a file.");
+                }
+            }
             else {
-                stringBuilder.append(line);
-                stringBuilder.append("\n");
+                stringBuilder.append(line).append("\n");
             }
 
 
@@ -120,11 +243,9 @@ public class Patchy {
         }
         patchParts.put(lastOrgAddress, stringBuilder.toString());
         patchReader.close();
-        //
+    }
 
-        ////
-        //Build separate patch files and compile
-        ////
+    private static void createSeparatePatchesAndCompile() {
         System.out.println("PATCHY: Creating " + patchParts.size() + " file(s) and passing to thumb.bat...");
         for (long address : patchParts.keySet()) {
             File part = new File(Long.toHexString(address) + ".asm");
@@ -132,7 +253,7 @@ public class Patchy {
                 FileOutputStream ostream = new FileOutputStream(part);
                 part.createNewFile();
                 ostream.write(patchParts.get(address).getBytes());
-                part.deleteOnExit();
+                //part.deleteOnExit();
                 ostream.close();
 
                 Process process = Runtime.getRuntime().exec("thumb.bat " + part.getName() + " " + Long.toHexString(address) + ".bin");
@@ -155,12 +276,10 @@ public class Patchy {
                 e.printStackTrace();
             }
         }
+    }
 
-        //
-        ////
-        //Code insertion
-        ////
-        System.out.println("PATCHY: Inserting compiled code into ROM.");
+    private static void insertCompiledCodeInROM() {
+        System.out.println("PATCHY: Inserting compiled code into ROM...");
         try {
             RandomAccessFile ROM = new RandomAccessFile(ROMFile, "rws");
             for (long address : patchParts.keySet()) {
@@ -175,19 +294,15 @@ public class Patchy {
             e.printStackTrace();
             error(0, "Problem inserting compiled code into ROM.");
         }
-        //
+    }
 
-        ////
-        //Post-run Cleanup
-        ////
+    private static void cleanup() {
+        System.out.println("PATCHY: Cleaning up...");
         for (long address : patchParts.keySet()) {
             File part = new File(Long.toHexString(address) + ".bin");
             part.deleteOnExit();
         }
-        //
-
-        System.out.println("PATCHY: Done patching! :D");
-        //(new Scanner(System.in)).nextLine();
+        inputReader.close();
     }
 
     private static void error(int line, String message) {
@@ -197,6 +312,18 @@ public class Patchy {
             System.out.println("PATCHY ERROR (line " + line + "): " + message);
 
         System.exit(1);
+    }
+
+    private static String readStringFromFile(String path) {
+        String result = "";
+        try {
+            result = new String(Files.readAllBytes(Paths.get(path)));
+        } catch (IOException e) {
+            e.printStackTrace();
+            error(0, "Something went wrong handling the patch file.");
+        }
+
+        return result;
     }
 
 
