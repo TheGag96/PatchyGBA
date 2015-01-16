@@ -21,7 +21,7 @@ import java.util.Scanner;
  *  the assembler during patching.
  */
 public class Patchy {
-    static final float VERSION = 0.2f;
+    static final float VERSION = 0.3f;
 
     ////
     //Important variables
@@ -169,18 +169,20 @@ public class Patchy {
                     }
 
                     if (lineScanner.hasNext()) {
-                        //support decimal numbers and hex numbers
+                        //support decimal numbers
                         if (lineScanner.hasNextInt()) {
                             varValue = lineScanner.nextInt();
                         }
                         else {
                             String valueString = lineScanner.next();
 
+                            //support prompt for empty variable
                             if (valueString.equals("<>")) {
                                 System.out.print("Value for variable \"" + varName + "\"? | ");
                                 valueString = inputReader.nextLine();
                             }
 
+                            //support hex numbers
                             if (valueString.startsWith("0x")) {
                                 try {
                                     varValue = Long.parseLong(valueString.substring(2), 16);
@@ -189,7 +191,6 @@ public class Patchy {
                                 }
                             }
                             else {
-
                                 try {
                                     varValue = Long.parseLong(valueString);
                                 } catch (NumberFormatException e) {
@@ -203,6 +204,7 @@ public class Patchy {
                                 }
                             }
                         }
+
                         equVars.put(varName, varValue);
                     }
                     else {
@@ -243,6 +245,21 @@ public class Patchy {
         }
         patchParts.put(lastOrgAddress, stringBuilder.toString());
         patchReader.close();
+
+        //readd .equ variables to each part if they weren't already there just in case
+        //i make sure to do this in the order they're declared. hopefully this prevents bugs but i don't think
+        //it will catch every edge case.
+        for (long address : patchParts.keySet()) {
+            String part = patchParts.get(address);
+            StringBuilder linesToAdd = new StringBuilder();
+            for (String varName : equVars.keySet()) {
+                String equLine = ".equ " + varName + ", " + equVars.get(varName);
+                if (!part.contains(equLine)) {
+                    linesToAdd.append(equLine);
+                }
+            }
+            patchParts.put(address, linesToAdd.toString() + part);
+        }
     }
 
     private static void createSeparatePatchesAndCompile() {
