@@ -7,21 +7,23 @@ import java.util.Scanner;
 /**
  *  Author: TheGag96
  *
- *  This is a wrapper for Hackmew's thumb.bat that allows you to patch a ROM directly after compilation without having
- *  to manually insert your code. It also allows you to patch code to multiple places with just one file.
+ *  This is a wrapper for HackMew's thumb.bat that adds a few new directives/improvements to the compiler:
  *
- *  It does this using an ".org" directive and it works similarly to the one found in 65c816 assemblers xkas and asar.
- *  The usage is: .org [hex address]
- *  And that's it. it treats each .org'd section of the code as a separate file, compiles them separately, and patches
- *  them to the places in ROM given. This means that you cannot branch in your code to places separated by .orgs.
- *  To accomplish this, I would probably need to simply write my own assembler, and I'm not sure I have the confidence
- *  to do that. :P
+ *  - a ".org [address]" directive to allow you to patch your code immediately to a specific place in ROM after compiling.
+ *  - a ".rom [filename]" directive that specifies a ROM file to patch every time (overridden if a filename is given in the program arguments).
+ *  - an addition to the ".equ" directive that lets you specify at compile-time what the value of a variable by using "<>" as the value.
+ *  - ...and possibly more to come at request!
  *
- *  Additionally, Patchy allows you write single-line comments with a semicolon (;). I simply hide these comments from
- *  the assembler during patching.
+ *  You can run it through a few ways:
+ *
+ *  - java -jar patchy.jar                          (will prompt for patch and ROM filenames)
+ *  - java -jar patchy.jar [.asm file]              (will prompt for ROM file if not specified with .rom in patch)
+ *  - java -jar patchy.jar [.asm file] [.gba file]  (will override .rom-specified filename)
+ *
+ *  Happy hacking!
  */
 public class Patchy {
-    static final float VERSION = 0.3f;
+    static final float VERSION = 0.4f;
 
     ////
     //Important variables
@@ -145,7 +147,7 @@ public class Patchy {
 
                     System.out.println("PATCHY: Found insertion directive to 0x" + Long.toHexString(address));
                     if (foundOrgOnce) {
-                        patchParts.put(lastOrgAddress, stringBuilder.toString());
+                        patchParts.put(lastOrgAddress, stringBuilder.append('\n').toString());
                         stringBuilder = new StringBuilder();
                     }
                     lastOrgAddress = address;
@@ -158,9 +160,9 @@ public class Patchy {
             else if (firstWord.equals(".equ") || firstWord.equals(".set")) {
                 String varName = "";
                 Object varValue = null;
-                lineScanner.useDelimiter(" *, *");  //comma goes after variable name
+                lineScanner.useDelimiter(", *");  //comma goes after variable name
                 if (lineScanner.hasNext()) {
-                    varName = lineScanner.next();
+                    varName = lineScanner.next().trim();
                     lineScanner.reset();
                     lineScanner.next();
 
@@ -226,7 +228,7 @@ public class Patchy {
                         }
                     }
                     else {
-                        error(lineNum, "ROM file already declared.");
+                        System.out.println("PATCHY: ROM filename specified in patch overridden by one specified by program arguments.");
                     }
                 }
                 else {
@@ -253,7 +255,7 @@ public class Patchy {
             String part = patchParts.get(address);
             StringBuilder linesToAdd = new StringBuilder();
             for (String varName : equVars.keySet()) {
-                String equLine = ".equ " + varName + ", " + equVars.get(varName);
+                String equLine = ".equ " + varName + ", " + equVars.get(varName) + "\n";
                 if (!part.contains(equLine)) {
                     linesToAdd.append(equLine);
                 }
@@ -265,27 +267,33 @@ public class Patchy {
     private static void createSeparatePatchesAndCompile() {
         System.out.println("PATCHY: Creating " + patchParts.size() + " file(s) and passing to thumb.bat...");
         for (long address : patchParts.keySet()) {
-            File part = new File(Long.toHexString(address) + ".asm");
+            File part = new File("0x" + Long.toHexString(address) + ".asm");
             try {
                 FileOutputStream ostream = new FileOutputStream(part);
                 part.createNewFile();
                 ostream.write(patchParts.get(address).getBytes());
-                //part.deleteOnExit();
+                part.deleteOnExit();
                 ostream.close();
 
-                Process process = Runtime.getRuntime().exec("thumb.bat " + part.getName() + " " + Long.toHexString(address) + ".bin");
+                Process process = Runtime.getRuntime().exec("thumb.bat " + part.getName() + " 0x" + Long.toHexString(address) + ".bin");
                 process.waitFor();
 
-                BufferedReader input = new BufferedReader(new InputStreamReader(process.getInputStream()));
-                String line = "";
-                while (true) {
-                    line = input.readLine();
-                    if (line == null) break;
-                    System.out.println("THUMB.BAT: " + line);
+                //write error messages
+                BufferedReader input = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+                String line = input.readLine();
+                boolean hadErrors = false;
+                if (line == null) {
+                    System.out.println("PATCHY: thumb.bat compiled part " + part.getName() + " successfully.");
                 }
-                if (process.exitValue() != 0) {
+                else {
+                    System.out.println("THUMB.BAT ERROR:");
+                    while (line != null) {
+                        line = input.readLine();
+                        System.out.println("    " + line);
+                    }
                     error(0, "Something went wrong during external compilation.");
                 }
+
             } catch (IOException e) {
                 e.printStackTrace();
                 error(0, "Problem creating/handling patch part " + part.getPath() + " for some reason...");
@@ -300,7 +308,7 @@ public class Patchy {
         try {
             RandomAccessFile ROM = new RandomAccessFile(ROMFile, "rws");
             for (long address : patchParts.keySet()) {
-                RandomAccessFile patchBin = new RandomAccessFile(new File(Long.toHexString(address)+".bin"), "rws");
+                RandomAccessFile patchBin = new RandomAccessFile(new File("0x" + Long.toHexString(address) + ".bin"), "rws");
                 byte[] binData = new byte[(int)patchBin.length()];
                 ROM.seek(address);
                 ROM.write(binData);
@@ -316,7 +324,7 @@ public class Patchy {
     private static void cleanup() {
         System.out.println("PATCHY: Cleaning up...");
         for (long address : patchParts.keySet()) {
-            File part = new File(Long.toHexString(address) + ".bin");
+            File part = new File("0x" + Long.toHexString(address) + ".bin");
             part.deleteOnExit();
         }
         inputReader.close();
