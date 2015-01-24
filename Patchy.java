@@ -23,7 +23,7 @@ import java.util.Scanner;
  *  Happy hacking!
  */
 public class Patchy {
-    static final float VERSION = 0.4f;
+    static final float VERSION = 0.5f;
 
     ////
     //Important variables
@@ -36,6 +36,7 @@ public class Patchy {
 
     public static void main(String[] args) throws FileNotFoundException {
 
+        checkForThumbBat();
         handleFileArguments(args);
         parsePatchForDirectives();
         createSeparatePatchesAndCompile();
@@ -43,6 +44,16 @@ public class Patchy {
         cleanup();
 
         System.out.println("PATCHY: Done patching! :D");
+    }
+
+    private static void checkForThumbBat() {
+        File asExe = new File("as.exe");
+        File objcopyExe = new File("objcopy.exe");
+        File thumbBat = new File("thumb.bat");
+
+        //stop program if the compiling tools aren't found
+        if (!asExe.exists() || !objcopyExe.exists() || !thumbBat.exists())
+            error(0, "The contents of HackMew's thumb.zip is required for this Patchy to function.");
     }
 
     private static void handleFileArguments(String[] args) {
@@ -97,25 +108,26 @@ public class Patchy {
     }
 
     private static void parsePatchForDirectives() {
+        //strip all comments with regex
+        patchText = patchText.replaceAll("(?s)/\\*.*\\*/", "");
+        patchText = patchText.replaceAll("@.*\n", "\n");
+
         Scanner patchReader = new Scanner(patchText);
         Scanner lineScanner;
         int lineNum = 1;
         StringBuilder stringBuilder = new StringBuilder();
         boolean foundOrgOnce = false;
-        long lastOrgAddress = 0;
+        long lastOrgAddress = -1;
+
+        //use a scanner to read the patch by line
         while (patchReader.hasNextLine()) {
 
             String line = patchReader.nextLine();
 
-            //remove comments
-            if (line.contains("@")) {
-                line = line.substring(0, line.indexOf('@'));
-            }
-            if (line.contains("/*")) {
-                line = line.substring(0, line.indexOf("/*"));
-            }
-
+            //we use a second scanner to scan the contents of each line
             lineScanner = new Scanner(line);
+
+            //skip line if it's blank
             if (!lineScanner.hasNext()) {
                 lineNum++;
                 stringBuilder.append("\n");
@@ -124,15 +136,22 @@ public class Patchy {
 
             String firstWord = lineScanner.next();
 
-            //detect directives and split up pieces of code in between
+            //detect directives and perform their functions
             if (firstWord.equals(".org")) {
                 long address = 0;
                 if (lineScanner.hasNext()) {
                     String addressString = lineScanner.next();
-                    if (addressString.startsWith("0x")) {
+
+                    //allow compile-time insertion point choosing
+                    if (addressString.equals("<>")) {
+                        System.out.print("Where to insert patch part #" + patchParts.size()+1 + "? | ");
+                        addressString = inputReader.nextLine();
+                    }
+
+                    if (addressString.startsWith("0x")) {   //hex numbers
                         address = Long.parseLong(addressString.substring(2), 16);
                     }
-                    else if (equVars.containsKey(addressString)) {
+                    else if (equVars.containsKey(addressString)) {  //.equ'd variables
                         Object equValue = equVars.get(addressString);
                         if (equValue instanceof Long) {
                             address = (Long)equValue;
@@ -145,11 +164,19 @@ public class Patchy {
                         error(lineNum, "\".org\" directive requires a valid hex address or variable.");
                     }
 
+                    //disallow negative numbers
+                    if (address < 0) {
+                        error(lineNum, "Insertion address can't be negative.");
+                    }
+
+                    //wrap up our current patch part and start a new one
                     System.out.println("PATCHY: Found insertion directive to 0x" + Long.toHexString(address));
                     if (foundOrgOnce) {
                         patchParts.put(lastOrgAddress, stringBuilder.append('\n').toString());
                         stringBuilder = new StringBuilder();
                     }
+
+                    //save the address given for when we finish up this next patch part
                     lastOrgAddress = address;
                     foundOrgOnce = true;
                 }
@@ -207,6 +234,11 @@ public class Patchy {
                             }
                         }
 
+                        //disallow negative numbers
+                        if (varValue instanceof Long && (Long)varValue < 0) {
+                            error(lineNum, "Variables cannot be negative.");
+                        }
+
                         equVars.put(varName, varValue);
                     }
                     else {
@@ -242,13 +274,25 @@ public class Patchy {
 
             lineNum++;
         }
+
+        //if .org was never used, ask for where to insert the patch
         if (!foundOrgOnce) {
-            error(0, ".org was never used in the patch file. Where do I put the code? :(");
+            System.out.print("Where to insert the patch? | ");
+            while (lastOrgAddress == -1) {
+                String addressString = inputReader.nextLine();
+                try {
+                    if (addressString.startsWith("0x")) {
+                        lastOrgAddress = Long.parseLong(addressString.substring(2), 16);
+                    }
+                } catch (NumberFormatException e) {
+                    error(0, "Needed a valid hex address as input.");
+                }
+            }
         }
         patchParts.put(lastOrgAddress, stringBuilder.toString());
         patchReader.close();
 
-        //readd .equ variables to each part if they weren't already there just in case
+        //read .equ variables to each part if they weren't already there just in case
         //i make sure to do this in the order they're declared. hopefully this prevents bugs but i don't think
         //it will catch every edge case.
         for (long address : patchParts.keySet()) {
@@ -275,6 +319,7 @@ public class Patchy {
                 part.deleteOnExit();
                 ostream.close();
 
+                //execute compiling tools
                 Process process = Runtime.getRuntime().exec("thumb.bat " + part.getName() + " 0x" + Long.toHexString(address) + ".bin");
                 process.waitFor();
 
@@ -324,8 +369,9 @@ public class Patchy {
     private static void cleanup() {
         System.out.println("PATCHY: Cleaning up...");
         for (long address : patchParts.keySet()) {
-            File part = new File("0x" + Long.toHexString(address) + ".bin");
-            part.deleteOnExit();
+            File partBin = new File("0x" + Long.toHexString(address) + ".bin");
+            if (!partBin.exists()) continue;
+            partBin.deleteOnExit();
         }
         inputReader.close();
     }
