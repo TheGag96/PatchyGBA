@@ -11,8 +11,8 @@ This is a wrapper for HackMew's [thumb.dat](http://www.pokecommunity.com/attachm
 
 You can run it through a few ways:
 
-* java -jar patchy.jar                          (will prompt for patch and ROM filenames)
-* java -jar patchy.jar [.asm file]              (will prompt for ROM file if not specified with .rom in patch)
-* java -jar patchy.jar [.asm file] [.gba file]  (will override .rom-specified filename)
+     java -jar patchy.jar                            (will prompt for patch and ROM filenames)
+     java -jar patchy.jar [.asm file]                (will prompt for ROM file if not specified with a .rom)
+     java -jar patchy.jar [.asm file] [.gba file]    (will override .rom-specified filename)
 
 Happy hacking!
